@@ -510,7 +510,9 @@ class PaliGemmaForConditionalGeneration(nn.Module):
             # The position of the query is just the last position
             position_ids = attention_mask.cumsum(-1)[:, -1]
             if position_ids.dim() == 1:
-                position_ids = position_ids.unsqueeze(0)
+                # Add the sequence dimension -> [Batch_Size, 1] (NOT [1, Batch_Size]).
+                # Using unsqueeze(-1) keeps batch on dim 0 so batched decode works.
+                position_ids = position_ids.unsqueeze(-1)
         else:
             # Create a position_ids based on the size of the attention_mask
             # For masked tokens, use the number 1 as position.
