@@ -1,0 +1,43 @@
+{
+  "label": "baseline_fp32_unoptimized",
+  "device": "NVIDIA A40",
+  "peak_hbm_GB_s": 696.0,
+  "params_B": 2.923,
+  "weight_GB": 11.694,
+  "batch_size": 32,
+  "decode_steps": 16,
+  "kv_geometry": {
+    "layers": 18,
+    "kv_heads": 1,
+    "head_dim": 256,
+    "dtype_bytes": 4
+  },
+  "rows": [
+    {
+      "context_len": 260,
+      "seq_len": 260,
+      "ttft_s": 3.1541,
+      "tpot_ms": 516.693,
+      "system_tps": 61.93,
+      "kv_cache_MB": 325.6,
+      "weight_GB_per_step": 11.694,
+      "kv_GB_per_step": 0.3256,
+      "achieved_GB_s": 23.26,
+      "pct_peak_bw": 3.3,
+      "peak_mem_MB": 20192.0
+    },
+    {
+      "context_len": 512,
+      "seq_len": 512,
+      "ttft_s": 5.38,
+      "tpot_ms": 532.211,
+      "system_tps": 60.13,
+      "kv_cache_MB": 622.9,
+      "weight_GB_per_step": 11.694,
+      "kv_GB_per_step": 0.6229,
+      "achieved_GB_s": 23.14,
+      "pct_peak_bw": 3.3,
+      "peak_mem_MB": 28387.0
+    }
+  ]
+}

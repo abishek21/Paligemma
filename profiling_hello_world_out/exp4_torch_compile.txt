@@ -1,0 +1,36 @@
+======================================================================
+EXPERIMENT 4 — SAME tiny ops, but torch.compile (FUSION)
+======================================================================
+
+HOTSPOT KERNEL : triton_poi_fused_add_mul_relu_0
+  (spent 0.002 ms on the GPU)
+TOTAL GPU KERNEL LAUNCHES : 3
+
+TAKEAWAY:
+  Identical math to exp3, but torch.compile FUSES the 150 elementwise ops
+  into just a few Triton kernels. Compare TOTAL GPU KERNEL LAUNCHES here vs
+  exp3 (311) — it should drop dramatically. Fewer launches = less CPU
+  dispatch overhead = the fix for launch-bound decode. This is exactly what
+  torch.compile would do to the real model's thousands of per-token kernels.
+
+FULL KERNEL TABLE (sorted by GPU self-time):
+------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                      Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+           triton_poi_fused_add_mul_relu_0         0.89%      18.242us        17.63%     362.671us     362.671us       1.856us       100.00%       1.856us       1.856us             1  
+           triton_poi_fused_add_mul_relu_0         0.00%       0.000us         0.00%       0.000us       0.000us       1.856us       100.00%       1.856us       1.856us             1  
+                   fifty_tiny_ops_compiled         0.00%       0.000us         0.00%       0.000us       0.000us       1.856us       100.00%       1.856us       1.856us             1  
+                   fifty_tiny_ops_compiled         3.23%      66.478us        99.69%       2.051ms       2.051ms       0.000us         0.00%       1.856us       1.856us             1  
+                  TorchDynamo Cache Lookup         0.54%      11.029us         0.54%      11.029us      11.029us       0.000us         0.00%       0.000us       0.000us             1  
+                Torch-Compiled Region: 0/0         5.58%     114.728us        95.92%       1.973ms       1.973ms       0.000us         0.00%       1.856us       1.856us             1  
+                         Pregraph bytecode         0.17%       3.573us         0.17%       3.573us       3.573us       0.000us         0.00%       0.000us       0.000us             1  
+    AOTDispatcher Runtime Wrapper Prologue         0.30%       6.094us         0.30%       6.094us       6.094us       0.000us         0.00%       0.000us       0.000us             1  
+                   Activity Buffer Request        72.25%       1.486ms        72.25%       1.486ms       1.486ms       0.000us         0.00%       0.000us       0.000us             1  
+                            cuLaunchKernel        16.74%     344.429us        16.74%     344.429us     344.429us       0.000us         0.00%       0.000us       0.000us             1  
+                     cudaDeviceSynchronize         0.31%       6.384us         0.31%       6.384us       3.192us       0.000us         0.00%       0.000us       0.000us             2  
+------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 2.057ms
+Self CUDA time total: 1.856us
+
+
+Chrome trace: profiling_hello_world_out/exp4_torch_compile.json  (open in https://ui.perfetto.dev)

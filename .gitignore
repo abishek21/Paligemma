@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .ipynb_checkpoints/
+
+# Large profiler Chrome traces (regenerate locally; open in Perfetto)
+traces/
+hello_trace.json
+profiling_hello_world_out/*.json

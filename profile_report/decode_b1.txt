@@ -1,0 +1,57 @@
+======================================================================
+DECODE  (batch=1, 1 token/step)  —  the MEMORY-bound stage
+======================================================================
+
+=== ROOFLINE (NVIDIA A40) ===
+  params               : 2.92 B  (11.69 GB in fp32)
+  peak fp32            : 37.4 TFLOP/s
+  HBM bandwidth        : 696 GB/s
+  ridge point (fp32)   : 53.7 FLOP/byte  (AI above this = compute-bound)
+  --- batch_size=1 ---
+  PREFILL  seq_len=260   AI=     130.0 FLOP/byte  -> COMPUTE-bound
+  DECODE   (1 token)          AI=       0.5 FLOP/byte  -> MEMORY-bound
+  DECODE memory-bound floor : 16.80 ms/token (= read 11.7 GB weights / 696 GB/s)
+
+MEASURED LATENCY        : 38.75 ms per call
+HOTSPOT GPU KERNEL      : ampere_sgemm_128x64_tn
+TOTAL GPU KERNEL LAUNCHES (over 10 runs): 36822
+GPU KERNEL LAUNCHES PER CALL          : 3682
+
+WHAT TO SEE:
+  - hotspot is a *gemv* kernel -> matrix x vector -> memory-bound.
+  - AI (roofline above) sits far BELOW the ridge point.
+  - this sets TPOT (time per output token).
+
+KERNEL-LAUNCH ATTRIBUTION (per decode step):
+  total GPU kernels / step        : 3682
+  redundant VISION tower / step   : 2284  (62% — wasted, image re-encoded!)
+  language model + merge / step   : 1398
+
+FIX IDEAS (in priority order):
+  1. encode image ONCE (skip vision tower during decode)  -> removes the vision kernels
+  2. torch.compile the LM                                 -> fuses the elementwise chains
+  3. CUDA graphs / bf16                                   -> cut launch overhead + bytes
+
+FULL KERNEL TABLE (sorted by GPU self-time):
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                               aten::mm         4.88%      15.789ms         6.83%      22.106ms      17.407us     173.047ms        46.01%     173.047ms     136.258us          1270  
+                                            aten::addmm         7.70%      24.918ms        12.11%      39.186ms      24.040us     151.520ms        40.29%     151.520ms      92.957us          1630  
+                                 ampere_sgemm_128x64_tn         0.00%       0.000us         0.00%       0.000us       0.000us      85.761ms        22.80%      85.761ms     155.929us           550  
+void gemv2T_kernel_val<int, int, float, float, float...         0.00%       0.000us         0.00%       0.000us       0.000us      82.789ms        22.01%      82.789ms     229.969us           360  
+                                 ampere_sgemm_32x128_tn         0.00%       0.000us         0.00%       0.000us       0.000us      63.844ms        16.97%      63.844ms      59.115us          1080  
+std::enable_if<!(false), void>::type internal::gemvx...         0.00%       0.000us         0.00%       0.000us       0.000us      41.104ms        10.93%      41.104ms     228.356us           180  
+std::enable_if<!(false), void>::type internal::gemvx...         0.00%       0.000us         0.00%       0.000us       0.000us      36.652ms         9.74%      36.652ms     192.905us           190  
+                                              aten::bmm         5.05%      16.352ms         7.37%      23.851ms      22.084us      17.037ms         4.53%      17.037ms      15.775us          1080  
+std::enable_if<!(false), void>::type internal::gemvx...         0.00%       0.000us         0.00%       0.000us       0.000us      11.491ms         3.06%      11.491ms      31.919us           360  
+                                ampere_sgemm_128x128_nn         0.00%       0.000us         0.00%       0.000us       0.000us      10.025ms         2.67%      10.025ms      37.130us           270  
+                                              aten::add         4.94%      15.969ms         7.79%      25.202ms      11.508us       6.240ms         1.66%       6.240ms       2.850us          2190  
+                                              aten::mul         4.23%      13.692ms         6.76%      21.871ms      11.391us       5.614ms         1.49%       5.614ms       2.924us          1920  
+                                            aten::copy_         1.60%       5.166ms         2.84%       9.199ms      10.951us       5.352ms         1.42%       5.352ms       6.371us           840  
+void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us       5.317ms         1.41%       5.317ms       6.485us           820  
+                                ampere_sgemm_128x128_tn         0.00%       0.000us         0.00%       0.000us       0.000us       4.639ms         1.23%       4.639ms      17.180us           270  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 323.571ms
+Self CUDA time total: 376.116ms
+

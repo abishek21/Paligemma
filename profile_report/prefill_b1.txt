@@ -1,0 +1,47 @@
+======================================================================
+PREFILL  (batch=1, prompt_tokens=260)  —  the COMPUTE-bound stage
+======================================================================
+
+=== ROOFLINE (NVIDIA A40) ===
+  params               : 2.92 B  (11.69 GB in fp32)
+  peak fp32            : 37.4 TFLOP/s
+  HBM bandwidth        : 696 GB/s
+  ridge point (fp32)   : 53.7 FLOP/byte  (AI above this = compute-bound)
+  --- batch_size=1 ---
+  PREFILL  seq_len=260   AI=     130.0 FLOP/byte  -> COMPUTE-bound
+  DECODE   (1 token)          AI=       0.5 FLOP/byte  -> MEMORY-bound
+  DECODE memory-bound floor : 16.80 ms/token (= read 11.7 GB weights / 696 GB/s)
+
+MEASURED LATENCY        : 124.51 ms per call
+HOTSPOT GPU KERNEL      : ampere_sgemm_128x64_tn
+TOTAL GPU KERNEL LAUNCHES (over 3 runs): 12685
+GPU KERNEL LAUNCHES PER CALL          : 4228
+
+WHAT TO SEE:
+  - hotspot is an *sgemm* (GEMM) kernel -> matrix x matrix -> compute-bound.
+  - AI (roofline above) sits far ABOVE the ridge point.
+  - this sets TTFT (time to first token).
+
+FULL KERNEL TABLE (sorted by GPU self-time):
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                               aten::mm         1.51%       5.179ms         2.50%       8.572ms      22.499us     285.435ms        77.55%     285.435ms     749.174us           381  
+                                 ampere_sgemm_128x64_tn         0.00%       0.000us         0.00%       0.000us       0.000us     234.228ms        63.63%     234.228ms     609.968us           384  
+                                ampere_sgemm_128x128_tn         0.00%       0.000us         0.00%       0.000us       0.000us      78.717ms        21.39%      78.717ms     416.489us           189  
+                                            aten::addmm         2.16%       7.383ms         3.40%      11.646ms      23.816us      49.405ms        13.42%      49.405ms     101.033us           489  
+                                 ampere_sgemm_32x128_tn         0.00%       0.000us         0.00%       0.000us       0.000us      21.135ms         5.74%      21.135ms      65.231us           324  
+                                              aten::bmm         1.41%       4.818ms         1.91%       6.547ms      20.208us       9.638ms         2.62%       9.638ms      29.746us           324  
+                                              aten::mul         1.20%       4.108ms         1.91%       6.546ms      11.364us       7.767ms         2.11%       7.767ms      13.485us           576  
+                                ampere_sgemm_128x128_nn         0.00%       0.000us         0.00%       0.000us       0.000us       5.677ms         1.54%       5.677ms      42.051us           135  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us       5.040ms         1.37%       5.040ms      31.109us           162  
+                                             aten::gelu         0.31%       1.049ms         0.48%       1.645ms      12.186us       4.127ms         1.12%       4.127ms      30.569us           135  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us       4.127ms         1.12%       4.127ms      30.569us           135  
+                                              aten::add         1.39%       4.760ms         2.20%       7.529ms      11.460us       3.411ms         0.93%       3.411ms       5.192us           657  
+                                  ampere_sgemm_64x64_tn         0.00%       0.000us         0.00%       0.000us       0.000us       3.124ms         0.85%       3.124ms      28.927us           108  
+                                            aten::copy_         0.68%       2.320ms         1.21%       4.155ms      11.543us       2.465ms         0.67%       2.465ms       6.848us           360  
+void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us       2.242ms         0.61%       2.242ms       7.473us           300  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 342.609ms
+Self CUDA time total: 368.086ms
+

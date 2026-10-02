@@ -1,0 +1,33 @@
+======================================================================
+EXPERIMENT 2 — MATRIX x VECTOR (the DECODE regime)  <-- the 'flip'
+======================================================================
+
+HOTSPOT KERNEL : std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, float, float, float, float, false, true, false, false, 9, false, cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<float const>, cublasGemvTensorStridedBatched<float const>, cublasGemvTensorStridedBatched<float>, float> >(cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<float const>, cublasGemvTensorStridedBatched<float const>, cublasGemvTensorStridedBatched<float>, float>)
+  (spent 2.437 ms on the GPU)
+TOTAL GPU KERNEL LAUNCHES : 81
+
+TAKEAWAY:
+  Same weight matrix, but input is now a VECTOR (one row). cuBLAS picks a
+  GEMV kernel (name contains 'gemv'). GEMV reads all the weights to do one
+  row of math = low arithmetic intensity = MEMORY-bound. This is decode.
+  Seeing 'gemv' instead of 'sgemm' is literally how you spot the decode regime.
+
+FULL KERNEL TABLE (sorted by GPU self-time):
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                             matmul_Mxv         0.00%       0.000us         0.00%       0.000us       0.000us       2.510ms       100.65%       2.510ms     125.500us            20  
+                                               aten::mm         7.69%     318.995us        52.34%       2.172ms     108.601us       2.494ms       100.00%       2.619ms     130.944us            20  
+std::enable_if<!(false), void>::type internal::gemvx...         0.00%       0.000us         0.00%       0.000us       0.000us       2.437ms        97.71%       2.437ms     121.841us            20  
+                                Activity Buffer Request        40.11%       1.665ms        40.11%       1.665ms       1.665ms     124.960us         5.01%     124.960us     124.960us             1  
+void cublasLt::splitKreduce_kernel<32, 16, int, floa...         0.00%       0.000us         0.00%       0.000us       0.000us      57.084us         2.29%      57.084us       2.854us            20  
+                                             matmul_Mxv         8.26%     342.977us        61.27%       2.543ms     127.139us       0.000us         0.00%       2.619ms     130.944us            20  
+                                           aten::matmul         0.67%      27.780us        53.00%       2.200ms     109.990us       0.000us         0.00%       2.619ms     130.944us            20  
+                                       cudaLaunchKernel         4.54%     188.227us         4.54%     188.227us       4.706us       0.000us         0.00%       0.000us       0.000us            40  
+                                  cudaDeviceSynchronize        38.73%       1.607ms        38.73%       1.607ms     803.725us       0.000us         0.00%       0.000us       0.000us             2  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 4.150ms
+Self CUDA time total: 2.494ms
+
+
+Chrome trace: profiling_hello_world_out/exp2_matrix_x_vector.json  (open in https://ui.perfetto.dev)

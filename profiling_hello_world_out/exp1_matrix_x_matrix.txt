@@ -1,0 +1,34 @@
+======================================================================
+EXPERIMENT 1 — MATRIX x MATRIX (the PREFILL regime)
+======================================================================
+
+HOTSPOT KERNEL : void cutlass::Kernel2<cutlass_80_simt_sgemm_256x128_8x4_nn_align1>(cutlass_80_simt_sgemm_256x128_8x4_nn_align1::Params)
+  (spent 119.401 ms on the GPU)
+TOTAL GPU KERNEL LAUNCHES : 61
+
+TAKEAWAY:
+  Input is a MATRIX (many rows), so cuBLAS/cutlass picks a GEMM kernel
+  (name contains 'sgemm'). GEMM reuses each weight across many rows =
+  high arithmetic intensity = COMPUTE-bound. This is what prefill looks like.
+
+FULL KERNEL TABLE (sorted by GPU self-time):
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                               aten::mm         0.35%     417.797us         1.98%       2.403ms     120.157us     119.401ms       100.00%     125.224ms       6.261ms            20  
+void cutlass::Kernel2<cutlass_80_simt_sgemm_256x128_...         0.00%       0.000us         0.00%       0.000us       0.000us     119.401ms       100.00%     119.401ms       5.970ms            20  
+                                             matmul_MxM         0.00%       0.000us         0.00%       0.000us       0.000us     119.401ms       100.00%     119.401ms       5.970ms            20  
+                                Activity Buffer Request         1.36%       1.651ms         1.36%       1.651ms       1.651ms       5.822ms         4.88%       5.822ms       5.822ms             1  
+                                             matmul_MxM         0.35%     419.860us         2.36%       2.857ms     142.853us       0.000us         0.00%     125.224ms       6.261ms            20  
+                                           aten::matmul         0.03%      34.076us         2.01%       2.437ms     121.861us       0.000us         0.00%     125.224ms       6.261ms            20  
+                                 cudaDeviceGetAttribute         0.01%       6.885us         0.01%       6.885us       0.344us       0.000us         0.00%       0.000us       0.000us            20  
+                                         cuLaunchKernel         0.11%     131.961us         0.11%     131.961us       6.598us       0.000us         0.00%       0.000us       0.000us            20  
+                                  cudaStreamIsCapturing         0.00%       3.900us         0.00%       3.900us       3.900us       0.000us         0.00%       0.000us       0.000us             1  
+                                             cudaMalloc         0.16%     191.788us         0.16%     191.788us     191.788us       0.000us         0.00%       0.000us       0.000us             1  
+                                  cudaDeviceSynchronize        97.64%     118.223ms        97.64%     118.223ms      59.112ms       0.000us         0.00%       0.000us       0.000us             2  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 121.080ms
+Self CUDA time total: 119.401ms
+
+
+Chrome trace: profiling_hello_world_out/exp1_matrix_x_matrix.json  (open in https://ui.perfetto.dev)

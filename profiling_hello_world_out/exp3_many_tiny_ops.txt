@@ -1,0 +1,36 @@
+======================================================================
+EXPERIMENT 3 — MANY TINY OPS (launch overhead)
+======================================================================
+
+HOTSPOT KERNEL : void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>)
+  (spent 0.071 ms on the GPU)
+TOTAL GPU KERNEL LAUNCHES : 311
+
+TAKEAWAY:
+  150 small elementwise ops (50 mul + 50 add + 50 relu) each launch their
+  OWN kernel -> ~150 kernels. The GPU finishes each instantly then waits for
+  the CPU to launch the next = LAUNCH-bound. This is why our real decode step
+  fires thousands of kernels. torch.compile would FUSE these into a handful.
+
+FULL KERNEL TABLE (sorted by GPU self-time):
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                         fifty_tiny_ops         0.00%       0.000us         0.00%       0.000us       0.000us      21.950ms     10669.35%      21.950ms      21.950ms             1  
+                                        aten::clamp_min         0.84%     283.194us        36.69%      12.348ms     246.964us      70.657us        34.35%      74.977us       1.500us            50  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us      70.657us        34.35%      70.657us       1.413us            50  
+                                              aten::mul         1.05%     354.291us        35.99%      12.112ms     242.239us      67.902us        33.01%      75.070us       1.501us            50  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us      67.902us        33.01%      67.902us       1.358us            50  
+                                              aten::add         0.92%     311.279us        25.04%       8.428ms     168.569us      67.167us        32.65%      71.295us       1.426us            50  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us      67.167us        32.65%      67.167us       1.343us            50  
+                       Runtime Triggered Module Loading        87.79%      29.544ms        87.79%      29.544ms       4.924ms       9.216us         4.48%       9.216us       1.536us             6  
+                                  Lazy Function Loading         0.16%      53.908us         0.16%      53.908us      17.969us       4.608us         2.24%       4.608us       1.536us             3  
+                                Activity Buffer Request         5.08%       1.710ms         5.08%       1.710ms       1.710ms       1.792us         0.87%       1.792us       1.792us             1  
+                                         fifty_tiny_ops         1.85%     624.061us        99.96%      33.642ms      33.642ms       0.000us         0.00%     221.342us     221.342us             1  
+                                       cudaLaunchKernel         1.88%     632.346us        89.83%      30.230ms     201.532us       0.000us         0.00%      13.824us       0.092us           150  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 33.654ms
+Self CUDA time total: 205.726us
+
+
+Chrome trace: profiling_hello_world_out/exp3_many_tiny_ops.json  (open in https://ui.perfetto.dev)
