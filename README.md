@@ -1,7 +1,7 @@
 # PaliGemma from Scratch → Optimized: a 32× Inference-Engineering Journey
 
 A **from-scratch PyTorch implementation** of Google's **PaliGemma** vision-language
-model, turned into a hands-on **LLM inference-optimization tutorial**. We profile the
+model, turned into a hands-on **LLM inference-optimization tutorial**. I profile the
 naive implementation, diagnose the bottlenecks with a roofline model, and apply four
 optimizations to make decode **32× faster** — landing **within 1.3% of HuggingFace
 `transformers`**, with **identical output** at every step.
@@ -26,10 +26,10 @@ optimizations to make decode **32× faster** — landing **within 1.3% of Huggin
 
 *(A40, batch 32, context 260, greedy decode, prompt `"caption en"`.)*
 
-### We essentially caught HuggingFace
+### This matches HuggingFace
 ![Ours vs HuggingFace](docs/images/hf_comparison.png)
 
-Our fully-optimized decode (**15.94 ms**) is within **1.3%** of HuggingFace's
+This fully-optimized decode (**15.94 ms**) is within **1.3%** of HuggingFace's
 production implementation (**15.74 ms**), and **TTFT is identical**. The last sliver is
 HF's CUDA-graph integration (see [the CUDA-graph wall](#the-cuda-graph-wall)).
 
@@ -63,9 +63,9 @@ of GEMM is how you spot the decode regime. See [`docs/PERF_ENGINEERING.md`](docs
 
 ---
 
-## 🔬 How we measured HBM traffic
+## 🔬 How I measured HBM traffic
 
-"Decode is memory-bound" is a claim — so we **measured** it. There are three levels:
+"Decode is memory-bound" is a claim — so I **measured** it. There are three levels:
 
 ### 1. Achieved-bandwidth method (what this repo uses — practical, no special tools)
 Model the bytes moved per decode step, divide by the measured step time:
@@ -77,7 +77,7 @@ achieved_BW   = (weight_bytes + kv_read_bytes) / step_time
 Then compare to the GPU's peak (696 GB/s on A40). **If achieved_BW → peak, you're
 memory-bandwidth-bound.** `hbm_kv_study.py` prints this as `ach_GB/s` and `%peak`.
 
-> **Key diagnostic we found:** the *naive* model achieved only **3% of peak** — meaning
+> **Key diagnostic I found:** the *naive* model achieved only **3% of peak** — meaning
 > it was *not* memory-bound but **overhead/waste-bound** (the redundant vision tower +
 > unfused kernels). After optimizing, decode reached a genuine memory-bound regime
 > (~50% of peak). **A low achieved-BW on a "memory-bound" workload is itself the signal
@@ -95,7 +95,7 @@ kernels) and needs the Nsight Compute CLI installed.
 `nvidia-smi dmon` shows % memory-controller activity — coarse, zero-setup, good for a
 quick "is the memory system saturated?" check.
 
-We also measure **KV-cache pressure** (memory + bandwidth) as context grows. On this model
+I also measure **KV-cache pressure** (memory + bandwidth) as context grows. On this model
 it's tiny — it uses **multi-query attention (1 KV head)** — confirming KV pressure is
 mostly a *serving-scale* (many heads × long context × big batch) concern.
 
@@ -113,10 +113,10 @@ mostly a *serving-scale* (many heads × long context × big batch) concern.
 Details, measured before/afters, and the full reasoning: [`docs/OPTIMIZATION_PLAN.md`](docs/OPTIMIZATION_PLAN.md).
 
 ### The CUDA-graph wall
-We also attempted **CUDA graphs** (`torch.compile(mode="reduce-overhead")`) via a
+I also attempted **CUDA graphs** (`torch.compile(mode="reduce-overhead")`) via a
 pre-allocated **`StaticKVCache`**. It gracefully *skipped* — a genuinely instructive
 finding. CUDA graphs require **static shapes + all-GPU inputs + no in-place mutation of
-graph inputs**. Our KV cache mutates buffers passed as inputs, and the per-step position
+graph inputs**. The KV cache mutates buffers passed as inputs, and the per-step position
 is a Python int. The full fix is the **gpt-fast / vLLM recipe**: register KV buffers as
 model buffers and pass `input_pos` as a device tensor. That structural refactor is exactly
 what separates a hand-written model from a production engine — and it's the remaining 1.3%.
@@ -209,7 +209,7 @@ Toggle any optimization: `--dtype float32 --sdpa False --compile False`.
 - **Architecture:** SigLIP vision encoder → linear projector → Gemma decoder (one checkpoint).
 - **Prefix-LM attention:** the image + prompt (prefix) attend **bidirectionally**; only the
   generated answer is causal. That's why the attention mask here is all-zeros (not causal),
-  and why we pass `attn_mask=...` (not `is_causal=True`) to SDPA.
+  and why I pass `attn_mask=...` (not `is_causal=True`) to SDPA.
 - **Image tokens:** 256 = (224/14)² patches, injected into `<image>` placeholder slots.
 - **Attention:** multi-query (1 KV head) → tiny KV cache.
 - **Context window:** 8192 tokens (RoPE).
