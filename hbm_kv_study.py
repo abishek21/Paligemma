@@ -78,10 +78,25 @@ def _build_prompt_ids(processor, image, device, text_tokens_target, batch_size):
 
 
 @torch.no_grad()
-def measure(model, processor, image, device, batch_size, context_len, decode_steps):
+def measure(model, processor, image, device, batch_size, context_len, decode_steps,
+            warmup: bool = False):
     text_target = max(1, context_len - 256)
     input_ids, attn, pv = _build_prompt_ids(processor, image, device, text_target, batch_size)
     seq_len = input_ids.shape[1]
+
+    # Warmup: run a full prefill + a few decode steps so torch.compile does its
+    # (slow) compilation here, NOT inside the timed region below.
+    if warmup:
+        wk = KVCache()
+        wo = model(input_ids=input_ids, pixel_values=pv, attention_mask=attn, kv_cache=wk)
+        wtok = torch.argmax(wo["logits"][:, -1, :], dim=-1, keepdim=True)
+        wattn = torch.cat([attn, torch.ones((batch_size, 1), device=device)], dim=-1)
+        for _ in range(3):
+            wo = model(input_ids=wtok, pixel_values=pv, attention_mask=wattn, kv_cache=wk)
+            wtok = torch.argmax(wo["logits"][:, -1, :], dim=-1, keepdim=True)
+            wattn = torch.cat([wattn, torch.ones((batch_size, 1), device=device)], dim=-1)
+        _sync()
+        del wk
 
     kv = KVCache()
     # ---- PREFILL (TTFT) ----
@@ -122,6 +137,8 @@ def main(
     decode_steps: int = 16,
     json_out: str = None,
     label: str = "baseline",
+    compile: bool = False,
+    compile_mode: str = "default",   # "default" | "reduce-overhead" | "max-autotune"
     only_cpu: bool = False,
 ):
     device = "cuda" if (not only_cpu and torch.cuda.is_available()) else "cpu"
@@ -131,6 +148,15 @@ def main(
     print("Loading model ...")
     model, tok = load_hf_model(model_path, device)
     model = model.to(device).eval()
+
+    if compile:
+        # Compile the LANGUAGE MODEL (the per-token decode hot path). dynamic=True
+        # tells the compiler to expect varying sequence lengths (the KV/context
+        # grows every decode step) so it doesn't recompile on every token.
+        print(f"Compiling language_model with torch.compile (mode={compile_mode}, dynamic=True) ...")
+        kw = {} if compile_mode == "default" else {"mode": compile_mode}
+        model.language_model = torch.compile(model.language_model, dynamic=True, **kw)
+
     processor = PaliGemmaProcessor(
         tok, model.config.vision_config.num_image_tokens,
         model.config.vision_config.image_size,
@@ -162,7 +188,8 @@ def main(
     rows = []
     for L in ctxs:
         try:
-            r = measure(model, processor, image, device, batch_size, L, decode_steps)
+            r = measure(model, processor, image, device, batch_size, L, decode_steps,
+                        warmup=compile)
         except torch.cuda.OutOfMemoryError:
             print(f"{L:>8}  OOM — stopping")
             torch.cuda.empty_cache()

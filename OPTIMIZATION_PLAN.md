@@ -51,6 +51,34 @@ Remaining headroom: still ~2,048 unfused kernels/token (→ torch.compile) and f
 
 ---
 
+### ✅ Opt #2 — torch.compile the language model  (DONE, Oct 3)
+`model.language_model = torch.compile(model.language_model, dynamic=True)` + warmup.
+Output verified identical. Measured at **batch 32, ctx 260**:
+
+| metric | encode-once | + torch.compile | change |
+|--------|------------:|----------------:|-------:|
+| **TPOT** | 33.4 ms | **30.7 ms** | ~8% faster |
+| **system tok/s** | 958.5 | **1042.8** | +9% |
+| **achieved HBM BW** | 360 GB/s (52%) | **391.7 GB/s (56%)** | +4 pts |
+
+**Why only ~8% (not the toy's 311→3)?** (a) **Graph breaks** — the `KVCache`
+Python-list append/concat + growing-context shapes stop torch.compile from fusing
+one clean graph; it fuses chunks between breaks. (b) We were **already memory-bound**
+(52% peak) after encode-once, so there's little launch overhead left to remove —
+fusion's main win. (c) `dynamic=True` avoids per-token recompiles at a small peak-speed
+cost. **The remaining ~44% to peak is the fp32 weight read** → only **bf16** fixes that.
+File: `results/hbm_compile_b32.json`.
+
+### Cumulative so far (batch 32, ctx 260)
+| stage | TPOT | system tok/s | %peak BW |
+|-------|-----:|-------------:|---------:|
+| baseline fp32 | 516.7 ms | 61.9 | 3% |
+| + encode once | 33.4 ms | 958.5 | 52% |
+| + torch.compile | 30.7 ms | 1042.8 | 56% |
+| **next: + bf16** | *(target ~½ floor)* | | |
+
+---
+
 ## The optimizations, in priority order
 
 ### 1. Encode image ONCE  (biggest, easiest win)  ⭐  — ✅ DONE (see results log)
