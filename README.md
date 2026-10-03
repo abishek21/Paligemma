@@ -225,6 +225,15 @@ The optimizations here target a **single-stream** model. Production serving adds
 ---
 
 ## Credits
-Model implementation follows the PaliGemma / Gemma / SigLIP architectures by Google.
-This repo adds the optimization journey, profiling toolkit, and educational docs.
+The from-scratch model implementation is based on **Umar Jamil's** excellent YouTube
+lecture *"Coding PaliGemma from scratch"* ([@hkproj](https://github.com/hkproj)) — his
+walkthrough provided the initial code and was instrumental to my understanding of the
+PaliGemma architecture. Huge thanks! 🙏
+
+This repo builds on that foundation by adding the **inference-optimization journey**
+(encode-once, bf16, torch.compile, FlashAttention), the **profiling/benchmarking toolkit**
+(roofline, HBM-traffic measurement, kernel profiling), the **HuggingFace comparison**, and
+the **educational docs**.
+
+Model architectures (PaliGemma / Gemma / SigLIP) by Google.
 Weights © Google, under the PaliGemma license (gated on Hugging Face).
