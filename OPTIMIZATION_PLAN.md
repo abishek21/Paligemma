@@ -79,6 +79,35 @@ File: `results/hbm_compile_b32.json`.
 
 ---
 
+### ✅ Opt #3 — bf16 weights  (DONE, Oct 3)
+`model.to(torch.bfloat16)` via `--dtype bfloat16`. Output verified identical (no
+quality loss). Weight bytes/step **11.69 → 5.85 GB** (halved). Batch 32, ctx 260:
+
+| metric | +compile (fp32) | + bf16 | + bf16 + compile |
+|--------|----------------:|-------:|-----------------:|
+| **TTFT** | — | 0.92 s | **0.58 s** |
+| **TPOT** | 30.7 ms | 20.6 ms | **17.2 ms** |
+| **system tok/s** | 1042.8 | 1552.2 | **1863.0** |
+| **peak mem** | 20.3 GB | 18.2 GB | **18.3 GB** |
+
+%peak-BW looks lower (50%) only because bf16 moves half the bytes — the honest
+metrics (TPOT, throughput) are the best yet. bf16 also runs ~4× faster on tensor
+cores, speeding up the compute-bound PREFILL too (TTFT 3.15 → 0.58 s).
+Files: `results/hbm_bf16_b32.json`, `results/hbm_bf16_compile_b32.json`.
+
+### FINAL cumulative (batch 32, ctx 260) — ~30× faster decode
+| stage | TTFT | TPOT | system tok/s |
+|-------|-----:|-----:|-------------:|
+| baseline fp32 | 3.15 s | 516.7 ms | 61.9 |
+| + encode once | — | 33.4 ms | 958.5 |
+| + torch.compile | — | 30.7 ms | 1042.8 |
+| + bf16 | 0.92 s | 20.6 ms | 1552.2 |
+| **+ bf16 + compile** | **0.58 s** | **17.2 ms** | **1863.0** |
+
+**Total: TPOT 30× faster, throughput 30×, TTFT 5.4× faster — output identical.**
+
+---
+
 ## The optimizations, in priority order
 
 ### 1. Encode image ONCE  (biggest, easiest win)  ⭐  — ✅ DONE (see results log)

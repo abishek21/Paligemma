@@ -137,6 +137,7 @@ def main(
     decode_steps: int = 16,
     json_out: str = None,
     label: str = "baseline",
+    dtype: str = "float32",          # "float32" | "bfloat16" | "float16"
     compile: bool = False,
     compile_mode: str = "default",   # "default" | "reduce-overhead" | "max-autotune"
     only_cpu: bool = False,
@@ -148,6 +149,15 @@ def main(
     print("Loading model ...")
     model, tok = load_hf_model(model_path, device)
     model = model.to(device).eval()
+
+    torch_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16,
+                   "float16": torch.float16}[dtype]
+    if torch_dtype != torch.float32:
+        # Cast weights to lower precision. This HALVES the bytes read per step
+        # (the memory-bound decode floor), the single biggest lever once we are
+        # bandwidth-bound. Vision tower + LM + projector all cast together.
+        print(f"Casting model to {dtype} ...")
+        model = model.to(torch_dtype)
 
     if compile:
         # Compile the LANGUAGE MODEL (the per-token decode hot path). dynamic=True

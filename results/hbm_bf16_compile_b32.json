@@ -1,0 +1,30 @@
+{
+  "label": "encode_once_bf16_compile",
+  "device": "NVIDIA A40",
+  "peak_hbm_GB_s": 696.0,
+  "params_B": 2.923,
+  "weight_GB": 5.847,
+  "batch_size": 32,
+  "decode_steps": 16,
+  "kv_geometry": {
+    "layers": 18,
+    "kv_heads": 1,
+    "head_dim": 256,
+    "dtype_bytes": 2
+  },
+  "rows": [
+    {
+      "context_len": 260,
+      "seq_len": 260,
+      "ttft_s": 0.5794,
+      "tpot_ms": 17.177,
+      "system_tps": 1862.95,
+      "kv_cache_MB": 162.8,
+      "weight_GB_per_step": 5.847,
+      "kv_GB_per_step": 0.1628,
+      "achieved_GB_s": 349.87,
+      "pct_peak_bw": 50.3,
+      "peak_mem_MB": 18293.0
+    }
+  ]
+}
