@@ -378,28 +378,61 @@ def main(
         d_trace = os.path.join(trace_dir, f"decode_b{b}.json") if trace_dir else None
         prof_dec = _profile_region(decode_once, active_steps=active_steps, trace_path=d_trace)
 
-        # Attribution: how many decode kernels are the redundant vision tower?
-        vis_launches = _count_launches_of(vision_only, active_steps) / active_steps
         total_dec_launches = _total_cuda_kernel_launches(prof_dec) / active_steps
+
+        # Attribution: DOES the vision tower actually run during decode?
+        # We detect this directly by counting real calls into model.vision_tower
+        # during one decode step (instead of assuming it is re-run). After the
+        # "encode image once" fix, this should be 0.
+        vis_calls = {"n": 0}
+        orig_vt_forward = model.vision_tower.forward
+
+        def _counting_forward(*a, **k):
+            vis_calls["n"] += 1
+            return orig_vt_forward(*a, **k)
+
+        model.vision_tower.forward = _counting_forward
+        decode_once()
+        model.vision_tower.forward = orig_vt_forward
+        vision_runs_in_decode = vis_calls["n"] > 0
+
+        if vision_runs_in_decode:
+            vis_launches = _count_launches_of(vision_only, active_steps) / active_steps
+            attribution = [
+                "KERNEL-LAUNCH ATTRIBUTION (per decode step):",
+                f"  total GPU kernels / step        : {total_dec_launches:.0f}",
+                f"  redundant VISION tower / step   : {vis_launches:.0f}  "
+                f"({100*vis_launches/max(total_dec_launches,1):.0f}% — WASTED, image re-encoded!)",
+                f"  language model + merge / step   : {total_dec_launches - vis_launches:.0f}",
+                "",
+                "  >> The vision tower is being re-run every decode step. Apply the",
+                "     'encode image once' fix to remove this waste.",
+            ]
+        else:
+            attribution = [
+                "KERNEL-LAUNCH ATTRIBUTION (per decode step):",
+                f"  total GPU kernels / step        : {total_dec_launches:.0f}",
+                "  vision tower during decode      : 0  (SKIPPED — encode-image-once is active)",
+                f"  language model + merge / step   : {total_dec_launches:.0f}",
+                "",
+                "  >> Good: the image is encoded ONCE (prefill only). These kernels are",
+                "     the real language-model decode work. Next lever: torch.compile / bf16.",
+            ]
+
         _save_stage_report(
             os.path.join(out_dir, f"decode_b{b}.txt"),
             f"DECODE  (batch={b}, 1 token/step)  —  the MEMORY-bound stage",
             roofline_text, prof_dec, dec_latency, active_steps,
             extra_lines=[
                 "WHAT TO SEE:",
-                "  - The LANGUAGE MODEL's own matmuls here are *gemv* kernels (matrix x",
+                "  - The language model's decode matmuls are *gemv* kernels (matrix x",
                 "    vector, 1 token) -> memory-bound. See gemv2T_kernel / gemvx in the table.",
-                "  - BUT note the hotspot may be an *sgemm* (GEMM): that is the redundant",
-                "    VISION tower (256 image patches = matrix) being re-run every decode step!",
-                "    A GEMM showing up in 'decode' is itself the smoking gun for wasted work.",
-                "  - AI (roofline above) for the real 1-token LM work sits far BELOW the ridge.",
+                "  - If a *sgemm* (GEMM) is the hotspot, the vision tower is being re-run",
+                "    every step (wasted) — the attribution below tells you for sure.",
+                "  - AI (roofline above) for the 1-token LM work sits far BELOW the ridge.",
                 "  - this stage sets TPOT (time per output token).",
                 "",
-                "KERNEL-LAUNCH ATTRIBUTION (per decode step):",
-                f"  total GPU kernels / step        : {total_dec_launches:.0f}",
-                f"  redundant VISION tower / step   : {vis_launches:.0f}  "
-                f"({100*vis_launches/max(total_dec_launches,1):.0f}% — wasted, image re-encoded!)",
-                f"  language model + merge / step   : {total_dec_launches - vis_launches:.0f}",
+                *attribution,
                 "",
                 "FIX IDEAS (in priority order):",
                 "  1. encode image ONCE (skip vision tower during decode)  -> removes the vision kernels",

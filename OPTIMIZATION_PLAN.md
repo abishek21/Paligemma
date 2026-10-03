@@ -28,9 +28,32 @@ redundant vision tower**. This is the headroom.
 
 ---
 
+## RESULTS LOG (measured wins)
+
+### ✅ Opt #1 — Encode image once  (DONE, Oct 3)
+Guard the vision tower on the prefill condition; skip it during decode.
+Output verified identical (`caption en` → same text). Measured at **batch 32**:
+
+| metric (ctx 260) | baseline (fp32) | encode-once | change |
+|------------------|----------------:|------------:|-------:|
+| **TPOT** | 516.7 ms | **33.4 ms** | **15.5× faster** |
+| **system tok/s** | 61.9 | **958.5** | **15.5×** |
+| **achieved HBM BW** | 23.3 GB/s (3%) | **360 GB/s (52%)** | **15×** |
+
+Batch-1 profiler: decode **38.75 → 19.74 ms**, kernels/token **3,682 → 2,048**,
+decode hotspot flipped from `ampere_sgemm` (vision GEMM) → `gemv2T_kernel` (real LM).
+Interpretation: removing the redundant image re-encode moved decode OUT of the
+"waste-bound" corner (3% BW) INTO the genuine memory-bound regime (52% BW).
+Files: `results/hbm_encode_once_b32.json`, `profile_report_encode_once/`.
+
+Remaining headroom: still ~2,048 unfused kernels/token (→ torch.compile) and fp32
+(→ bf16 halves the 16.8 ms memory floor).
+
+---
+
 ## The optimizations, in priority order
 
-### 1. Encode image ONCE  (biggest, easiest win)  ⭐
+### 1. Encode image ONCE  (biggest, easiest win)  ⭐  — ✅ DONE (see results log)
 - **Problem:** `forward` re-runs the full SigLIP vision tower every decode step; the
   result is discarded (no `<image>` slots in decode). ~62% of decode kernels wasted.
 - **Fix:** guard the vision tower on the prefill condition

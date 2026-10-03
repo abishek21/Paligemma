@@ -1,0 +1,63 @@
+======================================================================
+DECODE  (batch=1, 1 token/step)  —  the MEMORY-bound stage
+======================================================================
+
+=== ROOFLINE (NVIDIA A40) ===
+  params               : 2.92 B  (11.69 GB in fp32)
+  peak fp32            : 37.4 TFLOP/s
+  HBM bandwidth        : 696 GB/s
+  ridge point (fp32)   : 53.7 FLOP/byte  (AI above this = compute-bound)
+  --- batch_size=1 ---
+  PREFILL  seq_len=260   AI=     130.0 FLOP/byte  -> COMPUTE-bound
+  DECODE   (1 token)          AI=       0.5 FLOP/byte  -> MEMORY-bound
+  DECODE memory-bound floor : 16.80 ms/token (= read 11.7 GB weights / 696 GB/s)
+
+MEASURED LATENCY        : 19.73 ms per call
+HOTSPOT GPU KERNEL      : void gemv2T_kernel_val<int, int, float, float, float, float, 128, 16, 4, 4, false, false, cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<float const>, cublasGemvTensorStridedBatched<float const>, cublasGemvTensorStridedBatched<float>, float> >(cublasGemvParamsEx<int, cublasGemvTensorStridedBatched<float const>, cublasGemvTensorStridedBatched<float const>, cublasGemvTensorStridedBatched<float>, float>, float, float)
+TOTAL GPU KERNEL LAUNCHES (over 10 runs): 20481
+GPU KERNEL LAUNCHES PER CALL          : 2048
+
+WHAT TO SEE:
+  - The language model's decode matmuls are *gemv* kernels (matrix x
+    vector, 1 token) -> memory-bound. See gemv2T_kernel / gemvx in the table.
+  - If a *sgemm* (GEMM) is the hotspot, the vision tower is being re-run
+    every step (wasted) — the attribution below tells you for sure.
+  - AI (roofline above) for the 1-token LM work sits far BELOW the ridge.
+  - this stage sets TPOT (time per output token).
+
+KERNEL-LAUNCH ATTRIBUTION (per decode step):
+  total GPU kernels / step        : 2048
+  vision tower during decode      : 0  (SKIPPED — encode-image-once is active)
+  language model + merge / step   : 2048
+
+  >> Good: the image is encoded ONCE (prefill only). These kernels are
+     the real language-model decode work. Next lever: torch.compile / bf16.
+
+FIX IDEAS (in priority order):
+  1. encode image ONCE (skip vision tower during decode)  -> removes the vision kernels
+  2. torch.compile the LM                                 -> fuses the elementwise chains
+  3. CUDA graphs / bf16                                   -> cut launch overhead + bytes
+
+FULL KERNEL TABLE (sorted by GPU self-time):
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                               aten::mm         8.76%      16.362ms        11.87%      22.189ms      17.471us     153.460ms        91.03%     153.460ms     120.835us          1270  
+void gemv2T_kernel_val<int, int, float, float, float...         0.00%       0.000us         0.00%       0.000us       0.000us      73.606ms        43.66%      73.606ms     204.460us           360  
+std::enable_if<!(false), void>::type internal::gemvx...         0.00%       0.000us         0.00%       0.000us       0.000us      36.917ms        21.90%      36.917ms     205.094us           180  
+std::enable_if<!(false), void>::type internal::gemvx...         0.00%       0.000us         0.00%       0.000us       0.000us      32.166ms        19.08%      32.166ms     169.297us           190  
+std::enable_if<!(false), void>::type internal::gemvx...         0.00%       0.000us         0.00%       0.000us       0.000us       9.879ms         5.86%       9.879ms      27.441us           360  
+                                              aten::mul         5.85%      10.930ms         9.29%      17.357ms      10.519us       2.767ms         1.64%       2.767ms       1.677us          1650  
+                                              aten::add         5.96%      11.132ms         9.33%      17.434ms      10.630us       2.490ms         1.48%       2.490ms       1.518us          1640  
+                                              aten::cat         4.31%       8.059ms         6.49%      12.133ms      13.332us       2.410ms         1.43%       2.410ms       2.648us           910  
+                                              aten::bmm         4.83%       9.026ms         6.55%      12.240ms      22.667us       2.308ms         1.37%       2.308ms       4.273us           540  
+std::enable_if<!(false), void>::type internal::gemvx...         0.00%       0.000us         0.00%       0.000us       0.000us       1.997ms         1.18%       1.997ms       5.546us           360  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.410ms         0.84%       1.410ms       1.550us           910  
+void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us       1.343ms         0.80%       1.343ms       1.840us           730  
+void at::native::(anonymous namespace)::CatArrayBatc...         0.00%       0.000us         0.00%       0.000us       0.000us       1.257ms         0.75%       1.257ms       2.328us           540  
+                                             aten::mean         1.93%       3.601ms         2.76%       5.164ms      13.957us       1.130ms         0.67%       1.130ms       3.054us           370  
+void at::native::reduce_kernel<512, 1, at::native::R...         0.00%       0.000us         0.00%       0.000us       0.000us       1.130ms         0.67%       1.130ms       3.054us           370  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 186.858ms
+Self CUDA time total: 168.590ms
+

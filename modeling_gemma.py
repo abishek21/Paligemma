@@ -453,12 +453,12 @@ class PaliGemmaForConditionalGeneration(nn.Module):
     def _merge_input_ids_with_image_features(
         self, image_features: torch.Tensor, inputs_embeds: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor, kv_cache: Optional[KVCache] = None
     ):
-        _, _, embed_dim = image_features.shape
+        # embed_dim comes from the token embeddings so this works even when
+        # image_features is None (decode path).
+        embed_dim = inputs_embeds.shape[-1]
         batch_size, sequence_length = input_ids.shape
         dtype, device = inputs_embeds.dtype, inputs_embeds.device
-        # Shape: [Batch_Size, Seq_Len, Hidden_Size]
-        scaled_image_features = image_features / (self.config.hidden_size**0.5)
-    
+
         # Combine the embeddings of the image tokens, the text tokens and mask out all the padding tokens.
         final_embedding = torch.zeros(batch_size, sequence_length, embed_dim, dtype=inputs_embeds.dtype, device=inputs_embeds.device)
         # Shape: [Batch_Size, Seq_Len]. True for text tokens
@@ -475,8 +475,10 @@ class PaliGemmaForConditionalGeneration(nn.Module):
 
         # Add the text embeddings
         final_embedding = torch.where(text_mask_expanded, inputs_embeds, final_embedding)
-        # Insert image embeddings. We can't use torch.where because the sequence length of scaled_image_features is not equal to the sequence length of the final embedding
-        final_embedding = final_embedding.masked_scatter(image_mask_expanded, scaled_image_features)
+        # Insert image embeddings ONLY during prefill (decode has image_features=None).
+        if image_features is not None:
+            scaled_image_features = image_features / (self.config.hidden_size**0.5)
+            final_embedding = final_embedding.masked_scatter(image_mask_expanded, scaled_image_features)
         # Zero out padding tokens
         final_embedding = torch.where(pad_mask_expanded, torch.zeros_like(final_embedding), final_embedding)
 
@@ -535,11 +537,18 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         # shape: (Batch_Size, Seq_Len, Hidden_Size)
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
-        # 2. Merge text and images
-        # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
-        selected_image_feature = self.vision_tower(pixel_values.to(inputs_embeds.dtype))
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Hidden_Size]
-        image_features = self.multi_modal_projector(selected_image_feature)
+        # 2. Merge text and images.
+        # OPTIMIZATION (encode image once): only run the vision tower during
+        # PREFILL. During decode the sequence has no <image> tokens, so the
+        # image features would be computed and then thrown away — pure waste.
+        is_prefill = (kv_cache is None) or (kv_cache.num_items() == 0)
+        if is_prefill:
+            # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
+            selected_image_feature = self.vision_tower(pixel_values.to(inputs_embeds.dtype))
+            # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Hidden_Size]
+            image_features = self.multi_modal_projector(selected_image_feature)
+        else:
+            image_features = None  # decode: no image tokens to fill
 
         # Merge the embeddings of the text tokens and the image tokens
         inputs_embeds, attention_mask, position_ids = self._merge_input_ids_with_image_features(image_features, inputs_embeds, input_ids, attention_mask, kv_cache)
