@@ -41,7 +41,7 @@ from PIL import Image
 from torch.profiler import profile, ProfilerActivity, record_function
 
 from processing_paligemma import PaliGemmaProcessor
-from modeling_gemma import KVCache, PaliGemmaForConditionalGeneration
+from modeling_gemma import KVCache, StaticKVCache, PaliGemmaForConditionalGeneration
 from utils import load_hf_model
 
 
@@ -252,27 +252,26 @@ def roofline_report(model, batch_size, seq_len_prefill, kv_len_decode):
 # --------------------------------------------------------------------------- #
 # Build the two closures (prefill step, decode step) for a given batch size
 # --------------------------------------------------------------------------- #
-def _make_steps(model, processor, device, prompt, image, batch_size):
+def _make_steps(model, processor, device, prompt, image, batch_size,
+                cache_factory=None, decode_budget=64):
     inputs = processor(text=[prompt], images=[image])
     input_ids = inputs["input_ids"].to(device).repeat(batch_size, 1)
     attention_mask = inputs["attention_mask"].to(device).repeat(batch_size, 1)
     pixel_values = inputs["pixel_values"].to(device).repeat(batch_size, 1, 1, 1)
     seq_len = input_ids.shape[1]
 
+    if cache_factory is None:
+        cache_factory = lambda: KVCache()
+
     def prefill_once():
-        kv = KVCache()
+        kv = cache_factory()
         with torch.no_grad():
             model(input_ids=input_ids, pixel_values=pixel_values,
                   attention_mask=attention_mask, kv_cache=kv)
         return kv
 
-    # Pre-build a populated KV cache so decode steps are realistic.
-    kv_cache = prefill_once()
-    out_logits_tok = torch.argmax(
-        torch.zeros(batch_size, 1, model.config.vocab_size, device=device), dim=-1
-    )  # placeholder; replaced below
-    # Do one real prefill to get a valid next token + grown mask
-    kv_cache = KVCache()
+    # Do one real prefill to get a valid next token + grown mask + populated cache.
+    kv_cache = cache_factory()
     with torch.no_grad():
         o = model(input_ids=input_ids, pixel_values=pixel_values,
                   attention_mask=attention_mask, kv_cache=kv_cache)
@@ -302,6 +301,10 @@ def main(
     active_steps: int = 10,
     trace_dir: str = None,
     out_dir: str = "profile_report",
+    dtype: str = "float32",          # "float32" | "bfloat16" | "float16"
+    compile: bool = False,
+    compile_mode: str = "default",   # "default" | "reduce-overhead" | "max-autotune"
+    static_cache: bool = False,      # use StaticKVCache (enables CUDA graphs)
     only_cpu: bool = False,
 ):
     device = "cuda" if (not only_cpu and torch.cuda.is_available()) else "cpu"
@@ -310,6 +313,17 @@ def main(
     print("Loading model ...")
     model, tokenizer = load_hf_model(model_path, device)
     model = model.to(device).eval()
+
+    torch_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16,
+                   "float16": torch.float16}[dtype]
+    if torch_dtype != torch.float32:
+        print(f"Casting model to {dtype} ...")
+        model = model.to(torch_dtype)
+    if compile:
+        print(f"Compiling language_model (mode={compile_mode}, dynamic=True) ...")
+        kw = {} if compile_mode == "default" else {"mode": compile_mode}
+        model.language_model = torch.compile(model.language_model, dynamic=True, **kw)
+
     processor = PaliGemmaProcessor(
         tokenizer,
         model.config.vision_config.num_image_tokens,
@@ -330,8 +344,16 @@ def main(
         print("\n" + "#" * 70)
         print(f"# BATCH SIZE = {b}")
         print("#" * 70)
+        # Static cache needs room for the prompt + all profiled decode steps.
+        _ins = processor(text=[prompt], images=[image])
+        _seq = _ins["input_ids"].shape[1]
+        _max_len = _seq + active_steps + warmup_steps + 8
+        cache_factory = (
+            (lambda: StaticKVCache(max_seq_len=_max_len)) if static_cache
+            else (lambda: KVCache())
+        )
         prefill_once, decode_once, seq_len = _make_steps(
-            model, processor, device, prompt, image, b
+            model, processor, device, prompt, image, b, cache_factory=cache_factory
         )
 
         # A vision-tower-only closure, to attribute how many decode kernels are

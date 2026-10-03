@@ -1,0 +1,47 @@
+======================================================================
+PREFILL  (batch=1, prompt_tokens=260)  —  the COMPUTE-bound stage
+======================================================================
+
+=== ROOFLINE (NVIDIA A40) ===
+  params               : 2.92 B  (5.85 GB in fp32)
+  peak fp32            : 37.4 TFLOP/s
+  HBM bandwidth        : 696 GB/s
+  ridge point (fp32)   : 53.7 FLOP/byte  (AI above this = compute-bound)
+  --- batch_size=1 ---
+  PREFILL  seq_len=260   AI=     260.0 FLOP/byte  -> COMPUTE-bound
+  DECODE   (1 token)          AI=       1.0 FLOP/byte  -> MEMORY-bound
+  DECODE memory-bound floor : 8.40 ms/token (= read 5.8 GB weights / 696 GB/s)
+
+MEASURED LATENCY        : 32.30 ms per call
+HOTSPOT GPU KERNEL      : void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x4_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x4_tn_align8::Params)
+TOTAL GPU KERNEL LAUNCHES (over 3 runs): 8452
+GPU KERNEL LAUNCHES PER CALL          : 2817
+
+WHAT TO SEE:
+  - hotspot is an *sgemm* (GEMM) kernel -> matrix x matrix -> compute-bound.
+  - AI (roofline above) sits far ABOVE the ridge point.
+  - this sets TTFT (time to first token).
+
+FULL KERNEL TABLE (sorted by GPU self-time):
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                               aten::mm         5.14%       5.874ms         7.81%       8.921ms      20.509us      52.133ms        66.09%      52.133ms     119.845us           435  
+void cutlass::Kernel2<cutlass_80_tensorop_bf16_s1681...         0.00%       0.000us         0.00%       0.000us       0.000us      24.782ms        31.42%      24.782ms     229.460us           108  
+void cutlass::Kernel2<cutlass_80_tensorop_bf16_s1681...         0.00%       0.000us         0.00%       0.000us       0.000us      15.662ms        19.85%      15.662ms      96.681us           162  
+                                            aten::addmm         6.68%       7.638ms         8.97%      10.253ms      20.968us      11.466ms        14.53%      11.466ms      23.447us           489  
+ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_...         0.00%       0.000us         0.00%       0.000us       0.000us       9.339ms        11.84%       9.339ms       3.113ms             3  
+ampere_bf16_s16816gemm_bf16_64x64_ldg8_relu_f2f_stag...         0.00%       0.000us         0.00%       0.000us       0.000us       7.771ms         9.85%       7.771ms      19.187us           405  
+ampere_bf16_s16816gemm_bf16_128x64_ldg8_relu_f2f_sta...         0.00%       0.000us         0.00%       0.000us       0.000us       3.695ms         4.68%       3.695ms      43.988us            84  
+                                            aten::copy_         1.98%       2.263ms         3.71%       4.242ms      10.173us       2.351ms         2.98%       2.351ms       5.637us           417  
+                            triton_poi_fused_gelu_mul_9         0.33%     375.920us         0.53%     605.920us      11.221us       2.024ms         2.57%       2.024ms      37.487us            54  
+                            triton_poi_fused_gelu_mul_9         0.00%       0.000us         0.00%       0.000us       0.000us       2.024ms         2.57%       2.024ms      37.487us            54  
+                                              aten::bmm         2.64%       3.023ms         3.42%       3.914ms      24.158us       2.013ms         2.55%       2.013ms      12.428us           162  
+                           triton_poi_fused__to_copy_18         0.02%      28.124us         0.04%      44.927us      14.976us       1.848ms         2.34%       1.848ms     615.979us             3  
+                           triton_poi_fused__to_copy_18         0.00%       0.000us         0.00%       0.000us       0.000us       1.848ms         2.34%       1.848ms     615.979us             3  
+                     aten::_efficient_attention_forward         0.59%     679.166us         1.67%       1.913ms      35.428us       1.703ms         2.16%       1.703ms      31.539us            54  
+fmha_cutlassF_bf16_aligned_32x128_gmem_sm80(PyTorchM...         0.00%       0.000us         0.00%       0.000us       0.000us       1.703ms         2.16%       1.703ms      31.539us            54  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 114.302ms
+Self CUDA time total: 78.884ms
+

@@ -38,7 +38,7 @@ import torch
 from PIL import Image
 
 from processing_paligemma import PaliGemmaProcessor
-from modeling_gemma import KVCache, PaliGemmaForConditionalGeneration
+from modeling_gemma import KVCache, StaticKVCache, PaliGemmaForConditionalGeneration
 from utils import load_hf_model
 
 
@@ -79,28 +79,37 @@ def _build_prompt_ids(processor, image, device, text_tokens_target, batch_size):
 
 @torch.no_grad()
 def measure(model, processor, image, device, batch_size, context_len, decode_steps,
-            warmup: bool = False):
+            warmup: bool = False, static_cache: bool = False, mark_step: bool = False):
     text_target = max(1, context_len - 256)
     input_ids, attn, pv = _build_prompt_ids(processor, image, device, text_target, batch_size)
     seq_len = input_ids.shape[1]
 
+    # Factory so warmup and the timed run use the same cache type. The static
+    # cache needs a max length big enough for prompt + all decode steps.
+    max_len = seq_len + decode_steps + 4
+    def new_cache():
+        return StaticKVCache(max_seq_len=max_len) if static_cache else KVCache()
+
     # Warmup: run a full prefill + a few decode steps so torch.compile does its
     # (slow) compilation here, NOT inside the timed region below.
     if warmup:
-        wk = KVCache()
+        wk = new_cache()
+        if mark_step: torch.compiler.cudagraph_mark_step_begin()
         wo = model(input_ids=input_ids, pixel_values=pv, attention_mask=attn, kv_cache=wk)
         wtok = torch.argmax(wo["logits"][:, -1, :], dim=-1, keepdim=True)
         wattn = torch.cat([attn, torch.ones((batch_size, 1), device=device)], dim=-1)
         for _ in range(3):
+            if mark_step: torch.compiler.cudagraph_mark_step_begin()
             wo = model(input_ids=wtok, pixel_values=pv, attention_mask=wattn, kv_cache=wk)
-            wtok = torch.argmax(wo["logits"][:, -1, :], dim=-1, keepdim=True)
+            wtok = torch.argmax(wo["logits"][:, -1, :].clone(), dim=-1, keepdim=True)
             wattn = torch.cat([wattn, torch.ones((batch_size, 1), device=device)], dim=-1)
         _sync()
         del wk
 
-    kv = KVCache()
+    kv = new_cache()
     # ---- PREFILL (TTFT) ----
     _sync(); t0 = time.perf_counter()
+    if mark_step: torch.compiler.cudagraph_mark_step_begin()
     o = model(input_ids=input_ids, pixel_values=pv, attention_mask=attn, kv_cache=kv)
     _sync(); ttft = time.perf_counter() - t0
 
@@ -111,9 +120,13 @@ def measure(model, processor, image, device, batch_size, context_len, decode_ste
     step_times = []
     for _ in range(decode_steps):
         _sync(); s = time.perf_counter()
+        # CUDA graphs reuse fixed output buffers; mark the step so the previous
+        # output can be safely overwritten, and clone logits before reading.
+        if mark_step: torch.compiler.cudagraph_mark_step_begin()
         o = model(input_ids=next_tok, pixel_values=pv, attention_mask=attn, kv_cache=kv)
+        logits = o["logits"][:, -1, :].clone()
         _sync(); step_times.append(time.perf_counter() - s)
-        next_tok = torch.argmax(o["logits"][:, -1, :], dim=-1, keepdim=True)
+        next_tok = torch.argmax(logits, dim=-1, keepdim=True)
         attn = torch.cat([attn, torch.ones((batch_size, 1), device=device)], dim=-1)
 
     tpot = sum(step_times) / len(step_times)
@@ -140,6 +153,7 @@ def main(
     dtype: str = "float32",          # "float32" | "bfloat16" | "float16"
     compile: bool = False,
     compile_mode: str = "default",   # "default" | "reduce-overhead" | "max-autotune"
+    static_cache: bool = False,      # use StaticKVCache (enables CUDA graphs)
     only_cpu: bool = False,
 ):
     device = "cuda" if (not only_cpu and torch.cuda.is_available()) else "cpu"
@@ -160,10 +174,17 @@ def main(
         model = model.to(torch_dtype)
 
     if compile:
-        # Compile the LANGUAGE MODEL (the per-token decode hot path). dynamic=True
-        # tells the compiler to expect varying sequence lengths (the KV/context
-        # grows every decode step) so it doesn't recompile on every token.
-        print(f"Compiling language_model with torch.compile (mode={compile_mode}, dynamic=True) ...")
+        # NOTE on the static-cache + CUDA-graph frontier (see PERF notes):
+        # We keep dynamic=True because with our StaticKVCache the per-step
+        # *position* (num_items()) is a Python int that changes each token.
+        #   - dynamic=False -> torch.compile bakes it as a constant -> RECOMPILES
+        #     every token (catastrophic: ~4 s/token).
+        #   - dynamic=True  -> it becomes a symint (CPU) -> CUDA graphs are
+        #     skipped, but the run is stable and fast (fusion still applies).
+        # Full CUDA graphs need the gpt-fast recipe: position as a DEVICE tensor
+        # (input_pos) + KV buffers registered as MODEL buffers + manual
+        # cudagraph management. That is a structural refactor beyond this study.
+        print(f"Compiling language_model (mode={compile_mode}, dynamic=True) ...")
         kw = {} if compile_mode == "default" else {"mode": compile_mode}
         model.language_model = torch.compile(model.language_model, dynamic=True, **kw)
 
@@ -199,7 +220,8 @@ def main(
     for L in ctxs:
         try:
             r = measure(model, processor, image, device, batch_size, L, decode_steps,
-                        warmup=compile)
+                        warmup=(compile or static_cache), static_cache=static_cache,
+                        mark_step=(compile and compile_mode == "reduce-overhead"))
         except torch.cuda.OutOfMemoryError:
             print(f"{L:>8}  OOM — stopping")
             torch.cuda.empty_cache()

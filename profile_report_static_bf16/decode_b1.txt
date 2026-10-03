@@ -1,0 +1,63 @@
+======================================================================
+DECODE  (batch=1, 1 token/step)  —  the MEMORY-bound stage
+======================================================================
+
+=== ROOFLINE (NVIDIA A40) ===
+  params               : 2.92 B  (5.85 GB in fp32)
+  peak fp32            : 37.4 TFLOP/s
+  HBM bandwidth        : 696 GB/s
+  ridge point (fp32)   : 53.7 FLOP/byte  (AI above this = compute-bound)
+  --- batch_size=1 ---
+  PREFILL  seq_len=260   AI=     260.0 FLOP/byte  -> COMPUTE-bound
+  DECODE   (1 token)          AI=       1.0 FLOP/byte  -> MEMORY-bound
+  DECODE memory-bound floor : 8.40 ms/token (= read 5.8 GB weights / 696 GB/s)
+
+MEASURED LATENCY        : 11.20 ms per call
+HOTSPOT GPU KERNEL      : InductorBenchmarker.benchmark_gpu (dynamo_timed)
+TOTAL GPU KERNEL LAUNCHES (over 10 runs): 29726
+GPU KERNEL LAUNCHES PER CALL          : 2973
+
+WHAT TO SEE:
+  - The language model's decode matmuls are *gemv* kernels (matrix x
+    vector, 1 token) -> memory-bound. See gemv2T_kernel / gemvx in the table.
+  - If a *sgemm* (GEMM) is the hotspot, the vision tower is being re-run
+    every step (wasted) — the attribution below tells you for sure.
+  - AI (roofline above) for the 1-token LM work sits far BELOW the ridge.
+  - this stage sets TPOT (time per output token).
+
+KERNEL-LAUNCH ATTRIBUTION (per decode step):
+  total GPU kernels / step        : 2973
+  vision tower during decode      : 0  (SKIPPED — encode-image-once is active)
+  language model + merge / step   : 2973
+
+  >> Good: the image is encoded ONCE (prefill only). These kernels are
+     the real language-model decode work. Next lever: torch.compile / bf16.
+
+FIX IDEAS (in priority order):
+  1. encode image ONCE (skip vision tower during decode)  -> removes the vision kernels
+  2. torch.compile the LM                                 -> fuses the elementwise chains
+  3. CUDA graphs / bf16                                   -> cut launch overhead + bytes
+
+FULL KERNEL TABLE (sorted by GPU self-time):
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+       InductorBenchmarker.benchmark_gpu (dynamo_timed)         0.00%       0.000us         0.00%       0.000us       0.000us      83.245ms        73.06%      83.245ms       8.324ms            10  
+                                               aten::mm         0.87%     450.227ms         1.56%     802.329ms     291.121us      80.971ms        71.06%      80.971ms      29.380us          2756  
+void gemv2T_kernel_val<int, int, __nv_bfloat16, __nv...         0.00%       0.000us         0.00%       0.000us       0.000us      54.157ms        47.53%      54.157ms     146.369us           370  
+                                            aten::fill_         0.01%       7.255ms         0.03%      15.729ms       7.434us      21.435ms        18.81%      21.435ms      10.130us          2116  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us      21.378ms        18.76%      21.378ms      10.377us          2060  
+ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stages_64...         0.00%       0.000us         0.00%       0.000us       0.000us      19.489ms        17.10%      19.489ms     108.272us           180  
+std::enable_if<!(false), void>::type internal::gemvx...         0.00%       0.000us         0.00%       0.000us       0.000us       6.924ms         6.08%       6.924ms      10.686us           648  
+                     aten::_efficient_attention_forward         0.00%       2.340ms         0.01%       6.481ms      36.005us       4.623ms         4.06%       4.623ms      25.683us           180  
+fmha_cutlassF_bf16_aligned_32x128_gmem_sm80(PyTorchM...         0.00%       0.000us         0.00%       0.000us       0.000us       4.623ms         4.06%       4.623ms      25.683us           180  
+                             Torch-Compiled Region: 0/2         0.01%       7.674ms         0.21%     109.563ms     109.563ms       2.591ms         2.27%      33.137ms      33.137ms             1  
+                           triton_poi_fused__to_copy_17         0.00%       0.000us         0.00%       0.000us       0.000us     856.154us         0.75%     856.154us       4.001us           214  
+                         triton_poi_fused_add_cat_mul_4         0.00%       0.000us         0.00%       0.000us       0.000us     760.802us         0.67%     760.802us       2.679us           284  
+                         triton_poi_fused_add_cat_mul_6         0.01%       3.304ms         0.01%       4.477ms      15.544us     654.269us         0.57%     654.269us       2.272us           288  
+                         triton_poi_fused_add_cat_mul_6         0.00%       0.000us         0.00%       0.000us       0.000us     654.269us         0.57%     654.269us       2.272us           288  
+                         triton_poi_fused_add_cat_mul_5         0.00%       0.000us         0.00%       0.000us       0.000us     611.584us         0.54%     611.584us       1.635us           374  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 51.563s
+Self CUDA time total: 113.947ms
+

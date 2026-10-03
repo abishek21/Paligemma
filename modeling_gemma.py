@@ -5,6 +5,16 @@ from torch.nn import CrossEntropyLoss
 import math
 from modeling_siglip import SiglipVisionConfig, SiglipVisionModel
 
+# Toggle: use fused FlashAttention (F.scaled_dot_product_attention) instead of the
+# naive manual QK^T/softmax/V. Set via `set_use_sdpa(True)` before inference.
+USE_SDPA = False
+
+
+def set_use_sdpa(flag: bool) -> None:
+    """Enable/disable the fused SDPA (FlashAttention) path in GemmaAttention."""
+    global USE_SDPA
+    USE_SDPA = bool(flag)
+
 class KVCache():
 
     def __init__(self) -> None:
@@ -36,6 +46,63 @@ class KVCache():
 
         # ... and then we return all the existing keys + the new ones.
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
+
+
+class StaticKVCache():
+    """Compile-friendly KV cache for torch.compile + CUDA graphs.
+
+    Unlike `KVCache` (which grows via torch.cat on Python lists — two graph-break
+    sources for torch.compile), this cache:
+      - pre-allocates a fixed [B, H, MAX_SEQ_LEN, D] buffer per layer ONCE,
+      - writes new K/V into a slice (no cat, no list reassignment),
+      - returns the FULL fixed-size buffer so attention shapes are STATIC
+        (enabling CUDA graphs via mode='reduce-overhead').
+
+    The unfilled tail is masked out by the attention mask (built in the model's
+    merge step), so returning the full buffer is correct.
+
+    Usage contract:
+      - `num_items()` returns the filled length BEFORE the current forward
+        (so the mask/positions are built correctly), exactly like KVCache.
+      - the model calls `advance(q_len)` ONCE after each forward to move the
+        write cursor forward.
+    """
+    is_static = True
+
+    def __init__(self, max_seq_len: int) -> None:
+        self.max_seq_len = max_seq_len
+        self.key_cache: List[torch.Tensor] = []
+        self.value_cache: List[torch.Tensor] = []
+        self._len = 0  # filled length (constant during a single forward)
+
+    def num_items(self) -> int:
+        return self._len
+
+    def advance(self, n: int) -> None:
+        self._len += n
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        bsz, n_kv, seq, head_dim = key_states.shape
+        if layer_idx >= len(self.key_cache):
+            # Allocate this layer's fixed buffer ONCE.
+            self.key_cache.append(torch.zeros(
+                bsz, n_kv, self.max_seq_len, head_dim,
+                dtype=key_states.dtype, device=key_states.device))
+            self.value_cache.append(torch.zeros(
+                bsz, n_kv, self.max_seq_len, head_dim,
+                dtype=value_states.dtype, device=value_states.device))
+        start = self._len
+        # In-place slice write (compile-friendly, no cat / no reallocation).
+        self.key_cache[layer_idx][:, :, start:start + seq, :] = key_states
+        self.value_cache[layer_idx][:, :, start:start + seq, :] = value_states
+        # Return the FULL fixed-size buffer -> static shapes for the attention matmul.
+        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+
 
 class GemmaConfig():
 
@@ -260,19 +327,34 @@ class GemmaAttention(nn.Module):
         # Repeat the key and values to match the number of heads of the query
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-        # Perform the calculation as usual, Q * K^T / sqrt(head_dim). Shape: [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV]
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        assert attention_mask is not None
-        attn_weights = attn_weights + attention_mask
+        if USE_SDPA:
+            # FlashAttention via PyTorch's fused scaled_dot_product_attention.
+            # This fuses QK^T, scaling, mask-add, softmax, and (attn·V) into a
+            # SINGLE kernel that never materializes the big [.,.,q,kv] score
+            # matrix in HBM -> much less memory traffic (the decode win).
+            # attention_mask is our additive float mask ([B,1,q,kv]; 0 / -inf).
+            attn_output = nn.functional.scaled_dot_product_attention(
+                query_states, key_states, value_states,
+                attn_mask=attention_mask,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+                scale=1.0 / math.sqrt(self.head_dim),
+            )
+            attn_weights = None  # not materialized by the fused kernel
+        else:
+            # Perform the calculation as usual, Q * K^T / sqrt(head_dim). Shape: [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV]
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        # Apply the softmax
-        # [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV]
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        # Apply the dropout
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        # Multiply by the values. [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV] x [Batch_Size, Num_Heads_KV, Seq_Len_KV, Head_Dim] -> [Batch_Size, Num_Heads_Q, Seq_Len_Q, Head_Dim]
-        attn_output = torch.matmul(attn_weights, value_states)
+            assert attention_mask is not None
+            attn_weights = attn_weights + attention_mask
+
+            # Apply the softmax
+            # [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV]
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            # Apply the dropout
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            # Multiply by the values. [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV] x [Batch_Size, Num_Heads_KV, Seq_Len_KV, Head_Dim] -> [Batch_Size, Num_Heads_Q, Seq_Len_Q, Head_Dim]
+            attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -360,7 +442,9 @@ class GemmaModel(nn.Module):
         # [Batch_Size, Seq_Len, Hidden_Size]
         hidden_states = inputs_embeds
         # [Batch_Size, Seq_Len, Hidden_Size]
-        normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype)
+        # Use a Python float (not torch.tensor, which would default to a CPU
+        # tensor and force a CPU input into the graph — blocking CUDA graphs).
+        normalizer = self.config.hidden_size ** 0.5
         hidden_states = hidden_states * normalizer
 
         for decoder_layer in self.layers:
@@ -487,7 +571,28 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         dtype, device = inputs_embeds.dtype, inputs_embeds.device
         min_dtype = torch.finfo(dtype).min
         q_len = inputs_embeds.shape[1]
-    
+
+        # ---- STATIC cache path (compile + CUDA graphs) ----
+        if getattr(kv_cache, "is_static", False):
+            filled = kv_cache.num_items()          # positions already written
+            valid_len = filled + q_len             # positions valid after this step
+            max_len = kv_cache.max_seq_len
+            # Mask of shape [B, 1, q_len, MAX]: 0 for valid kv positions, -inf beyond.
+            # (All prompt/generated tokens attend to all valid positions — matching
+            #  the bidirectional-prompt behavior of the dynamic path.)
+            kv_idx = torch.arange(max_len, device=device)
+            allowed = (kv_idx < valid_len)                       # [MAX]
+            causal_mask = torch.where(
+                allowed, torch.zeros((), dtype=dtype, device=device),
+                torch.full((), min_dtype, dtype=dtype, device=device),
+            )
+            causal_mask = causal_mask.view(1, 1, 1, max_len).expand(batch_size, 1, q_len, max_len)
+            # Positions = filled+1 .. filled+q_len  (1-based, matching the dynamic path).
+            position_ids = torch.arange(
+                filled + 1, filled + q_len + 1, device=device
+            ).unsqueeze(0).expand(batch_size, -1)
+            return final_embedding, causal_mask, position_ids
+
         if kv_cache is None or kv_cache.num_items() == 0:
             # Do not mask any token, because we're in the prefill phase
             # This only works when we have no padding
@@ -559,5 +664,10 @@ class PaliGemmaForConditionalGeneration(nn.Module):
             inputs_embeds=inputs_embeds,
             kv_cache=kv_cache,
         )
+
+        # Static cache: move the write cursor forward once per step (all layers
+        # wrote at the same `start = num_items()` position during this forward).
+        if getattr(kv_cache, "is_static", False):
+            kv_cache.advance(input_ids.shape[1])
 
         return outputs
